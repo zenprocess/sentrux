@@ -5,3 +5,8 @@
 
 mod main_impl;
 pub use main_impl::run;
+
+// SPEC-651 — `sentrux serve` axum HTTP daemon. Module is public so
+// embedders (e.g. argus's container running the binary directly) can
+// link against the same surface.
+pub mod serve;

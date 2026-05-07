@@ -201,6 +201,24 @@ Agent: session_end()
 
 9 tools: `scan` · `health` · `session_start` · `session_end` · `rescan` · `check_rules` · `evolution` · `dsm` · `test_gaps`
 
+## HTTP daemon (`sentrux serve`)
+
+Long-running REST daemon that exposes scoring, baselines, rules, and treemaps over HTTP. Designed for embedding in larger code-intelligence platforms (e.g. argus) where the consumer wants live arch-quality signal alongside its own indexes — without spawning a CLI per query.
+
+```bash
+# Serve loopback-only on :8103, watching every immediate child of /repos
+sentrux serve --listen 127.0.0.1:8103 --watch /repos
+
+# Score a repo (lazy if no --watch, cached if watched)
+curl 'http://127.0.0.1:8103/score?repo=myproject'
+
+# Pin the current score as the baseline
+curl -X POST 'http://127.0.0.1:8103/baseline?repo=myproject' \
+     -H 'Content-Type: application/json' -d '{"action":"set"}'
+```
+
+Routes: `GET /health` · `GET /score` · `GET|POST /baseline` · `GET /rules` · `POST /rescan` · `GET /treemap`. All responses are JSON. Filesystem watching uses `notify` with a 2s debounce; rescans run in a background tokio task. Loopback-only by default — wrap in a reverse proxy if exposing externally.
+
 ## Rules engine
 
 Define architectural constraints. Enforce them in CI. Let the agent know the boundaries.

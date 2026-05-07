@@ -66,6 +66,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the architectural quality REST daemon (axum HTTP server).
+    /// Mirrors check/gate scoring through HTTP routes for consumers like
+    /// argus's /api/architectural/* proxy. SPEC-651.
+    Serve {
+        /// HTTP listen address. Default loopback-only.
+        #[arg(long, default_value = "127.0.0.1:8103")]
+        listen: String,
+        /// Watch directory; each immediate child is a separate repo.
+        /// Without --watch, scoring is lazy-per-request.
+        #[arg(long)]
+        watch: Option<String>,
+        /// State directory for baselines + custom rules.
+        /// Default: ~/.local/share/sentrux/state/
+        #[arg(long)]
+        state_dir: Option<String>,
+    },
+
     /// Enforce architectural rules defined in .sentrux/rules.toml
     Check {
         /// Directory to check
@@ -199,6 +216,34 @@ pub fn run() -> eframe::Result<()> {
     }
 
     match cli.command {
+        Some(Command::Serve {
+            listen,
+            watch,
+            state_dir,
+        }) => {
+            let state = match crate::serve::ServeState::new(watch, state_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("sentrux serve: state init failed: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("sentrux serve: tokio runtime init failed: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            if let Err(e) = runtime.block_on(crate::serve::run(state, &listen)) {
+                eprintln!("sentrux serve: server error: {}", e);
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Some(Command::Check { path }) => {
             std::process::exit(run_check(&path));
         }
