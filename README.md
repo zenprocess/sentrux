@@ -203,7 +203,7 @@ Agent: session_end()
 
 ## HTTP daemon (`sentrux serve`)
 
-Long-running REST daemon that exposes scoring, baselines, rules, and treemaps over HTTP. Designed for embedding in larger code-intelligence platforms (e.g. argus) where the consumer wants live arch-quality signal alongside its own indexes — without spawning a CLI per query.
+Long-running REST daemon that exposes the same surface as `sentrux mcp`, but over HTTP instead of stdio JSON-RPC. Designed for embedding in larger code-intelligence platforms where consumers want live arch-quality signal alongside their own indexes — without spawning a CLI per query.
 
 ```bash
 # Serve loopback-only on :8103, watching every immediate child of /repos
@@ -215,9 +215,27 @@ curl 'http://127.0.0.1:8103/score?repo=myproject'
 # Pin the current score as the baseline
 curl -X POST 'http://127.0.0.1:8103/baseline?repo=myproject' \
      -H 'Content-Type: application/json' -d '{"action":"set"}'
+
+# Hotspots from git history
+curl 'http://127.0.0.1:8103/evolution?repo=myproject&days=90'
+
+# Untested high-risk files
+curl 'http://127.0.0.1:8103/test-gaps?repo=myproject&limit=10'
 ```
 
-Routes: `GET /health` · `GET /score` · `GET|POST /baseline` · `GET /rules` · `POST /rescan` · `GET /treemap`. All responses are JSON. Filesystem watching uses `notify` with a 2s debounce; rescans run in a background tokio task. Loopback-only by default — wrap in a reverse proxy if exposing externally.
+| Route | MCP-tool equivalent |
+|---|---|
+| `GET /health` · `GET /score` | `health` |
+| `POST /scan` | `scan` |
+| `GET\|POST /baseline` | `session_start` / `session_end` |
+| `GET /rules` | `check_rules` |
+| `POST /rescan` | `rescan` |
+| `GET /evolution` | `git_stats` |
+| `GET /dsm` | `dsm` |
+| `GET /test-gaps` | `test_gaps` |
+| `GET /treemap` | (serve-specific) |
+
+All responses are JSON. Filesystem watching uses `notify` with a 2s debounce; rescans run in a background tokio task. Loopback-only by default — wrap in a reverse proxy if exposing externally. AI agents using Claude Code can pick up the discovery layer at `.claude/skills/sentrux-serve/SKILL.md`.
 
 ## Rules engine
 

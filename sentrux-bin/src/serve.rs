@@ -28,6 +28,8 @@ use tokio::sync::RwLock;
 
 use sentrux_core::analysis::{self, scanner::common::ScanLimits};
 use sentrux_core::core::settings::Settings;
+use sentrux_core::core::snapshot::Snapshot;
+use sentrux_core::core::types::FileNode;
 use sentrux_core::metrics::{
     self,
     rules::{check_rules, RulesConfig},
@@ -54,6 +56,11 @@ pub async fn run(
         .route("/rules", get(handle_get_rules))
         .route("/rescan", post(handle_rescan))
         .route("/treemap", get(handle_treemap))
+        // SPEC-651 — MCP-parity routes (cover the surface `sentrux mcp` exposes)
+        .route("/scan", post(handle_scan))
+        .route("/evolution", get(handle_evolution))
+        .route("/dsm", get(handle_dsm))
+        .route("/test-gaps", get(handle_test_gaps))
         .layer(tower_http::cors::CorsLayer::very_permissive())
         .with_state(shared.clone());
 
@@ -690,6 +697,322 @@ async fn write_baseline(
     tokio::fs::write(&tmp, text).await?;
     tokio::fs::rename(&tmp, &path).await?;
     Ok(())
+}
+
+// --------------------------------------------------------------------------
+// MCP-parity helpers: build_complexity_map + build_known_files
+// (mirrored from sentrux-core::app::mcp_server::handlers_evo where they're
+// pub(crate). Inlining here keeps upstream surface unchanged.)
+// --------------------------------------------------------------------------
+
+fn build_complexity_map(snapshot: &Snapshot) -> HashMap<String, u32> {
+    let mut map = HashMap::new();
+    collect_complexity(&snapshot.root, &mut map);
+    map
+}
+
+fn extract_max_cc(node: &FileNode) -> Option<u32> {
+    let funcs = node.sa.as_ref()?.functions.as_ref()?;
+    Some(funcs.iter().filter_map(|f| f.cc).max().unwrap_or(1))
+}
+
+fn collect_complexity(node: &FileNode, map: &mut HashMap<String, u32>) {
+    if !node.is_dir {
+        if let Some(cc) = extract_max_cc(node) {
+            map.insert(node.path.clone(), cc);
+        }
+    }
+    if let Some(children) = &node.children {
+        for child in children {
+            collect_complexity(child, map);
+        }
+    }
+}
+
+fn build_known_files(snapshot: &Snapshot) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    collect_files(&snapshot.root, &mut set);
+    set
+}
+
+fn collect_files(node: &FileNode, set: &mut std::collections::HashSet<String>) {
+    if !node.is_dir {
+        set.insert(node.path.clone());
+    }
+    if let Some(children) = &node.children {
+        for child in children {
+            collect_files(child, set);
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// MCP-parity routes
+// --------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ScanBody {
+    path: String,
+    #[serde(default)]
+    repo_name: Option<String>,
+}
+
+/// `POST /scan` — explicit scan-and-cache for callers without --watch.
+/// Body: `{path: "<absolute_path>", repo_name: "<optional_alias>"}`.
+/// Returns the same payload shape as `/score` after caching.
+async fn handle_scan(
+    State(state): State<Arc<ServeState>>,
+    Json(body): Json<ScanBody>,
+) -> impl IntoResponse {
+    let path = PathBuf::from(&body.path);
+    if !path.is_dir() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "BAD_PATH",
+            &format!("path is not a directory: {}", body.path),
+        );
+    }
+    let repo = body
+        .repo_name
+        .or_else(|| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "anon".to_string());
+    let entry = match score_path(&path) {
+        Ok(e) => e,
+        Err(err) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "SCORE_FAILED", &err);
+        }
+    };
+    state.cache.write().await.insert(repo.clone(), entry.clone());
+    let baseline = read_baseline(&state, &repo).await.ok();
+    Json(build_score_response(&repo, &entry, baseline.as_ref())).into_response()
+}
+
+#[derive(Deserialize)]
+struct EvolutionQuery {
+    repo: Option<String>,
+    days: Option<u32>,
+}
+
+/// `GET /evolution?repo=<name>&days=<N>` — MCP `git_stats` equivalent.
+/// Returns churn, hotspots, single-author ratio, coupling pairs.
+async fn handle_evolution(
+    State(state): State<Arc<ServeState>>,
+    Query(q): Query<EvolutionQuery>,
+) -> impl IntoResponse {
+    let repo = match q.repo {
+        Some(r) => r,
+        None => {
+            return error_response(StatusCode::BAD_REQUEST, "MISSING_REPO", "repo required");
+        }
+    };
+    let path = match resolve_repo_path(&state, &repo) {
+        Some(p) => p,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "REPO_PATH_UNRESOLVABLE",
+                "no --watch dir and repo not previously scanned",
+            );
+        }
+    };
+    let path_str = match path.to_str() {
+        Some(s) => s,
+        None => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "BAD_PATH", "non-UTF8 path");
+        }
+    };
+    let result =
+        match analysis::scanner::scan_directory(path_str, None, None, &cli_scan_limits(), None) {
+            Ok(r) => r,
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "SCAN_FAILED",
+                    &e.to_string(),
+                );
+            }
+        };
+    let snapshot = result.snapshot;
+    let known = build_known_files(&snapshot);
+    let complexity = build_complexity_map(&snapshot);
+
+    let report =
+        match metrics::evo::compute_evolution(&path, &known, &complexity, q.days) {
+            Ok(r) => r,
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "EVOLUTION_FAILED",
+                    &format!("evolution analysis failed: {}", e),
+                );
+            }
+        };
+
+    Json(serde_json::json!({
+        "repo": repo,
+        "lookback_days": report.lookback_days,
+        "commits_analyzed": report.commits_analyzed,
+        "files_with_churn": report.churn.len(),
+        "single_author_ratio": report.single_author_ratio,
+        "coupling_pairs_found": report.coupling_pairs.len(),
+        "hotspot_count": report.hotspots.len(),
+        "bus_factor_solo_files":
+            (report.single_author_ratio * report.churn.len() as f64).round() as u32,
+        "top_hotspots": report.hotspots.iter().take(10).map(|h| serde_json::json!({
+            "file": h.file,
+            "risk_score": h.risk_score,
+            "churn": h.churn_count,
+            "complexity": h.max_complexity,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct DsmQuery {
+    repo: Option<String>,
+    format: Option<String>,
+}
+
+/// `GET /dsm?repo=<name>&format=text|stats` — MCP `dsm` equivalent.
+async fn handle_dsm(
+    State(state): State<Arc<ServeState>>,
+    Query(q): Query<DsmQuery>,
+) -> impl IntoResponse {
+    let repo = match q.repo {
+        Some(r) => r,
+        None => {
+            return error_response(StatusCode::BAD_REQUEST, "MISSING_REPO", "repo required");
+        }
+    };
+    let path = match resolve_repo_path(&state, &repo) {
+        Some(p) => p,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "REPO_PATH_UNRESOLVABLE",
+                "no --watch dir and repo not previously scanned",
+            );
+        }
+    };
+    let path_str = match path.to_str() {
+        Some(s) => s,
+        None => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "BAD_PATH", "non-UTF8 path");
+        }
+    };
+    let result =
+        match analysis::scanner::scan_directory(path_str, None, None, &cli_scan_limits(), None) {
+            Ok(r) => r,
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "SCAN_FAILED",
+                    &e.to_string(),
+                );
+            }
+        };
+    let dsm = metrics::dsm::build_dsm(&result.snapshot.import_graph);
+    let stats = metrics::dsm::compute_stats(&dsm);
+
+    let mut body = serde_json::json!({
+        "repo": repo,
+        "size": stats.size,
+        "edge_count": stats.edge_count,
+        "density": stats.density,
+        "above_diagonal": stats.above_diagonal,
+        "below_diagonal": stats.below_diagonal,
+        "same_level": stats.same_level,
+        "propagation_cost": stats.propagation_cost,
+        "level_breaks": dsm.level_breaks.len(),
+        "interpretation": if stats.above_diagonal == 0 {
+            "Clean layering: all dependencies flow downward"
+        } else if stats.above_diagonal as f64 / stats.edge_count.max(1) as f64 > 0.2 {
+            "Significant architectural inversions detected"
+        } else {
+            "Mostly clean layering with minor inversions"
+        },
+        "clusters": stats.clusters.iter().take(5).map(|c| serde_json::json!({
+            "level": c.level,
+            "files_count": c.files.len(),
+            "internal_edges": c.internal_edges,
+        })).collect::<Vec<_>>(),
+    });
+    if q.format.as_deref() == Some("text") {
+        body["matrix"] = serde_json::json!(metrics::dsm::render_text(&dsm, 30));
+    }
+    Json(body).into_response()
+}
+
+#[derive(Deserialize)]
+struct TestGapsQuery {
+    repo: Option<String>,
+    limit: Option<usize>,
+}
+
+/// `GET /test-gaps?repo=<name>&limit=<N>` — MCP `test_gaps` equivalent.
+async fn handle_test_gaps(
+    State(state): State<Arc<ServeState>>,
+    Query(q): Query<TestGapsQuery>,
+) -> impl IntoResponse {
+    let repo = match q.repo {
+        Some(r) => r,
+        None => {
+            return error_response(StatusCode::BAD_REQUEST, "MISSING_REPO", "repo required");
+        }
+    };
+    let path = match resolve_repo_path(&state, &repo) {
+        Some(p) => p,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "REPO_PATH_UNRESOLVABLE",
+                "no --watch dir and repo not previously scanned",
+            );
+        }
+    };
+    let path_str = match path.to_str() {
+        Some(s) => s,
+        None => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "BAD_PATH", "non-UTF8 path");
+        }
+    };
+    let result =
+        match analysis::scanner::scan_directory(path_str, None, None, &cli_scan_limits(), None) {
+            Ok(r) => r,
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "SCAN_FAILED",
+                    &e.to_string(),
+                );
+            }
+        };
+    let complexity = build_complexity_map(&result.snapshot);
+    let report = metrics::testgap::compute_test_gaps(&result.snapshot, &complexity);
+    let limit = q.limit.unwrap_or(20);
+
+    Json(serde_json::json!({
+        "repo": repo,
+        "coverage_score": report.coverage_score,
+        "source_files": report.source_files,
+        "test_files": report.test_files,
+        "tested": report.tested_source_files,
+        "untested": report.untested_source_files,
+        "coverage_ratio": report.coverage_ratio,
+        "riskiest_untested": report.gaps.iter().take(limit).map(|g| serde_json::json!({
+            "file": g.file,
+            "risk_score": g.risk_score,
+            "complexity": g.max_complexity,
+            "fan_in": g.fan_in,
+            "lang": g.lang,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
 }
 
 fn build_score_response(

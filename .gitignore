@@ -20,7 +20,9 @@ target/
 
 # Local tools
 .beemem*/
-.claude/
+# SPEC-651 — keep .claude/ ignored except the skills subdir which the PR ships
+.claude/*
+!.claude/skills/
 .wrangler/
 sentrux-core/src/analysis/plugin/embedded.rs
 .switchyard-tool-log.jsonl
