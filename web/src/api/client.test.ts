@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "./client";
-import { SAMPLE_SCORE } from "../test/fixtures";
+import { SAMPLE_RULES, SAMPLE_SCORE, SAMPLE_TREEMAP } from "../test/fixtures";
 
 function mockFetchOnce(body: unknown, init?: { status?: number }): void {
   const status = init?.status ?? 200;
@@ -48,5 +48,35 @@ describe("DaemonClient", () => {
     );
     const client = new DaemonClient("http://daemon.local:8103");
     await expect(client.score("/missing")).rejects.toThrow(/not indexed/);
+  });
+
+  it("builds /treemap URL with repo param and returns the payload", async () => {
+    mockFetchOnce(SAMPLE_TREEMAP);
+    const client = new DaemonClient("http://daemon.local:8103");
+    const out = await client.treemap("/x/y");
+    expect(out.treemap.max_blast_radius).toBe(219);
+    expect(out.treemap.files).toHaveLength(5);
+    const call = vi.mocked(fetch).mock.calls[0];
+    expect(call).toBeDefined();
+    if (call) {
+      expect(String(call[0])).toBe(
+        "http://daemon.local:8103/treemap?repo=%2Fx%2Fy",
+      );
+    }
+  });
+
+  it("builds /rules URL with repo param and returns the payload", async () => {
+    mockFetchOnce(SAMPLE_RULES);
+    const client = new DaemonClient("http://daemon.local:8103");
+    const out = await client.rules("/x/y");
+    expect(out.rules_loaded).toBe(true);
+    expect(out.violation_count).toBe(2);
+    const call = vi.mocked(fetch).mock.calls[0];
+    expect(call).toBeDefined();
+    if (call) {
+      expect(String(call[0])).toBe(
+        "http://daemon.local:8103/rules?repo=%2Fx%2Fy",
+      );
+    }
   });
 });

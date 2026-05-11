@@ -1,11 +1,13 @@
 /**
  * 30-day score sparkline.
  *
- * Phase 2 MVP placeholder — the daemon does not yet expose a per-repo history
- * endpoint (probing `/history` returned 404 at the time of writing). When that
- * endpoint lands (tracked for Phase 2.1), wire `data` to its response and drop
- * the placeholder branch. The component already renders a real polyline from
- * whatever `data` is passed, so the integration is a one-line client call.
+ * Placeholder pending a daemon-side history endpoint. `sentrux serve` does not
+ * expose `GET /history?repo=...` yet (Phase 2.1 probe confirmed 404 — the
+ * baseline store keeps only the current baseline, not a per-day series), so
+ * there is nothing to fetch. Tracked upstream: the daemon needs to persist and
+ * serve daily composite scores. The component already renders a real polyline
+ * from whatever `number[]` is passed, so wiring it is a one-line client call
+ * once the endpoint exists.
  */
 interface SparklineProps {
   data: number[] | null;
@@ -25,7 +27,7 @@ export function Sparkline({
         style={{ width, height }}
         data-testid="sparkline-empty"
       >
-        no history yet — queued for Phase 2.1
+        no history — daemon has no /history endpoint yet
       </div>
     );
   }

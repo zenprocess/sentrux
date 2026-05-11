@@ -2,7 +2,9 @@ import type {
   BaselineResponse,
   DaemonError,
   HealthResponse,
+  RulesResponse,
   ScoreResponse,
+  TreemapResponse,
 } from "./types";
 
 /**
@@ -68,6 +70,14 @@ export class DaemonClient {
 
   baseline(repo: string): Promise<BaselineResponse> {
     return this.fetchJson<BaselineResponse>("/baseline", { repo });
+  }
+
+  treemap(repo: string): Promise<TreemapResponse> {
+    return this.fetchJson<TreemapResponse>("/treemap", { repo });
+  }
+
+  rules(repo: string): Promise<RulesResponse> {
+    return this.fetchJson<RulesResponse>("/rules", { repo });
   }
 }
 

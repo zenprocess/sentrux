@@ -122,16 +122,32 @@ export function RadarChart({
           data-testid="radar-current"
         />
 
-        {/* points */}
-        {points.map((p, i) => (
-          <circle
-            key={`pt-${axes[i]}`}
-            cx={p.x}
-            cy={p.y}
-            r={3.5}
-            fill="rgb(103, 212, 160)"
-          />
-        ))}
+        {/* points — hovering shows the current value and, when a baseline
+            series is present, the per-indicator delta (current − baseline). */}
+        {points.map((p, i) => {
+          const k = axes[i];
+          const cur = indicators[k].value;
+          const base = baseline ? baseline[k]?.value : undefined;
+          const delta = typeof base === "number" ? cur - base : null;
+          const tip =
+            delta == null
+              ? `${INDICATOR_LABELS[k]}: ${cur.toFixed(3)}`
+              : `${INDICATOR_LABELS[k]}: ${cur.toFixed(3)} (${
+                  delta >= 0 ? "+" : ""
+                }${delta.toFixed(3)} vs baseline)`;
+          return (
+            <circle
+              key={`pt-${k}`}
+              cx={p.x}
+              cy={p.y}
+              r={3.5}
+              fill="rgb(103, 212, 160)"
+              data-testid={`radar-point-${k}`}
+            >
+              <title>{tip}</title>
+            </circle>
+          );
+        })}
 
         {/* axis labels */}
         {axes.map((k, i) => {

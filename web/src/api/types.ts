@@ -41,6 +41,22 @@ export interface Diagnostics {
 
 export type Verdict = "READY" | "CONDITIONAL" | "BLOCK";
 
+/**
+ * A persisted baseline as the daemon stores it: a composite score plus the
+ * five indicator values captured at baseline-set time, with provenance.
+ *
+ * Older daemons (pre Phase-2.1) persisted only `{score, set_at, set_by}` —
+ * `indicators` is therefore optional. When present it lets the radar draw a
+ * real "vs baseline" overlay; when absent the GUI falls back to a
+ * composite-only delta.
+ */
+export interface Baseline {
+  score: number;
+  set_at: string;
+  set_by: string;
+  indicators?: Record<IndicatorKey, number> | null;
+}
+
 export interface ScoreResponse {
   repo: string;
   score: number;
@@ -49,13 +65,13 @@ export interface ScoreResponse {
   source: string;
   indicators: Record<IndicatorKey, IndicatorReading>;
   diagnostics: Diagnostics;
-  baseline: ScoreResponse | null;
+  baseline: Baseline | null;
   delta: number | null;
 }
 
 export interface BaselineResponse {
   repo: string;
-  baseline: ScoreResponse | null;
+  baseline: Baseline | null;
   current_score: number | null;
   delta: number | null;
 }
@@ -64,6 +80,49 @@ export interface HealthResponse {
   status: string;
   version: string;
   repos_indexed?: number;
+}
+
+// --- /treemap -------------------------------------------------------------
+
+export type TreemapFileKind = "god" | "hotspot" | string;
+
+export interface TreemapFile {
+  path: string;
+  /** Daemon-reported magnitude (fan-out / churn); used as the rect area. */
+  size: number;
+  kind: TreemapFileKind;
+}
+
+export interface TreemapData {
+  files: TreemapFile[];
+  max_blast_file: string | null;
+  max_blast_radius: number;
+  attack_surface_files: number;
+}
+
+export interface TreemapResponse {
+  repo: string;
+  treemap: TreemapData;
+}
+
+// --- /rules ---------------------------------------------------------------
+
+export type RuleSeverity = "error" | "warning" | string;
+
+export interface RuleViolation {
+  severity: RuleSeverity;
+  rule: string;
+  message: string;
+  files: string[];
+}
+
+export interface RulesResponse {
+  repo: string;
+  rules_loaded: boolean;
+  rules_checked?: number;
+  violations: RuleViolation[];
+  violation_count: number;
+  message?: string;
 }
 
 export interface DaemonError {
