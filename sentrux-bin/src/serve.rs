@@ -61,11 +61,23 @@ pub async fn run(
         .route("/evolution", get(handle_evolution))
         .route("/dsm", get(handle_dsm))
         .route("/test-gaps", get(handle_test_gaps))
+        // Phase 2.1 — embedded web GUI. axum matches the literal JSON routes
+        // above before the `/*path` wildcard, so this only ever serves the
+        // SPA shell (`/`) and the hashed static assets.
+        .route("/", get(crate::assets::handle_index))
+        .route("/*path", get(crate::assets::handle_asset))
         .layer(tower_http::cors::CorsLayer::very_permissive())
         .with_state(shared.clone());
 
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    eprintln!("[sentrux] serve listening on http://{}", listen);
+    if crate::assets::gui_embedded() {
+        eprintln!("[sentrux] serve listening on http://{} (web GUI at /)", listen);
+    } else {
+        eprintln!(
+            "[sentrux] serve listening on http://{} (GUI not embedded — `cd web && npm run build` then rebuild)",
+            listen
+        );
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -449,8 +461,8 @@ async fn handle_post_baseline(
     match body.action.as_str() {
         "set" => {
             let cache = state.cache.read().await;
-            let score = match cache.get(&repo) {
-                Some(e) => e.composite_score,
+            let (score, indicators) = match cache.get(&repo) {
+                Some(e) => (e.composite_score, Some(BaselineIndicators::from_cache(e))),
                 None => {
                     return error_response(
                         StatusCode::NOT_FOUND,
@@ -464,6 +476,7 @@ async fn handle_post_baseline(
                 score,
                 set_at: chrono::Utc::now(),
                 set_by: "api".to_string(),
+                indicators,
             };
             if let Err(e) = write_baseline(&state, &repo, &baseline).await {
                 return error_response(
@@ -668,6 +681,32 @@ struct Baseline {
     score: i64,
     set_at: chrono::DateTime<chrono::Utc>,
     set_by: String,
+    /// The five root-cause indicator values at baseline-set time. Optional so
+    /// older on-disk baselines (which only stored `score`) still deserialize;
+    /// when present the GUI can draw a real "vs baseline" overlay on the radar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    indicators: Option<BaselineIndicators>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct BaselineIndicators {
+    modularity: f64,
+    acyclicity: f64,
+    depth: f64,
+    equality: f64,
+    redundancy: f64,
+}
+
+impl BaselineIndicators {
+    fn from_cache(e: &ScoreCacheEntry) -> Self {
+        Self {
+            modularity: e.modularity,
+            acyclicity: e.acyclicity,
+            depth: e.depth,
+            equality: e.equality,
+            redundancy: e.redundancy,
+        }
+    }
 }
 
 fn baseline_path(state: &ServeState, repo: &str) -> PathBuf {

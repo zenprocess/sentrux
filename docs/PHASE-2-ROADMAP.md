@@ -1,60 +1,54 @@
-# Phase 2 roadmap (post-MVP)
+# Phase 2 roadmap
 
-The Phase 2 MVP (this PR) delivers a standalone Vite/React GUI that consumes
-a running `sentrux serve` daemon and renders the five indicators, composite
-score, verdict and diagnostics. The items below are explicitly deferred.
+The Phase 2 MVP delivered a standalone Vite/React GUI that consumes a
+running `sentrux serve` daemon and renders the five indicators, composite
+score, verdict and diagnostics. Phase 2.1 (this iteration) folds in binary
+embedding, the treemap, the baseline-diff overlay and the rules panel.
 
-## Phase 2.1 — binary embedding
+## Phase 2.1 — GUI enrichment — DONE
 
-- Wire `include_dir!()` (or `rust-embed`) over `web/dist/` so the daemon
-  can serve the SPA from `GET /` when the `gui` feature is enabled.
-- Add a `--no-gui` flag for headless deployments.
-- Verify the embedded payload stays under ~250 KB gzipped (target moved
-  upward from the original 50 KB envelope because @visx adds ~80 KB; if we
-  need to hit 50 KB the radar can be reimplemented in pure SVG without
-  @visx and the build can drop React entirely).
+- **Binary embedding** — `web/dist/` is baked into the `sentrux` binary via
+  `rust-embed` (`sentrux-bin/src/assets.rs`). `sentrux serve` serves the SPA
+  at `GET /`, hashed assets at `/assets/*` (with `immutable` cache headers),
+  and falls back to `index.html` for client-side routes. The JSON API routes
+  are matched ahead of the `/*path` wildcard, so nothing shadows them.
+  `web/dist/` is committed (see `web/.gitignore`) so a plain `cargo build`
+  yields a working GUI; rebuild + recommit it after touching `web/src/`.
+  - Build flow: `cd web && npm run build` then `cargo build --release`.
+  - No `--no-gui` flag was added — the embedded payload is ~73 KB gzipped
+    JS + ~2 KB gzipped CSS (well under the ~250 KB envelope), so there is
+    nothing to opt out of. Revisit if the payload ever grows materially.
+- **Treemap** (`web/src/components/Treemap.tsx`) — squarified treemap of the
+  per-file hotspots from `/treemap?repo=...`, sized by the daemon-reported
+  magnitude and coloured by kind (`god` → amber, `hotspot` → red). Hover
+  shows file path + kind + magnitude; the summary line shows max blast
+  radius and attack-surface size. Hand-rolled pure-SVG layout — no
+  `@visx/hierarchy` dependency, keeping the bundle small. Tab alongside the
+  radar. Note `/treemap` only serves repos the daemon has already scored, so
+  the Treemap tab fetches lazily after `/score` has run (or relies on
+  `--watch`).
+- **Baseline diff overlay** — the daemon's `Baseline` now also persists the
+  five indicator values at baseline-set time (`sentrux-bin/src/serve.rs`),
+  surfaced through both `/baseline` and `/score`'s `baseline` field. The GUI
+  adds a "vs baseline" toggle that overlays the recorded baseline as a faint
+  dashed polygon on the radar and shows per-indicator deltas in the point
+  tooltips. The composite delta is already rendered on the score banner.
+  Baselines set before this change have no `indicators` payload — the toggle
+  then explains that re-setting the baseline enables the overlay.
+- **Rules panel** (`web/src/components/RulesPanel.tsx`) — read-only table of
+  `/rules?repo=...` output: severity badge, rule name, message, affected
+  files, plus a "rules loaded" / "all pass" / "N violations" summary. No
+  authoring — the daemon stays the source of truth.
 
-## Phase 2.2 — historical trend (`/history`)
+## Phase 2.2 — historical trend (`/history`) — BLOCKED on daemon
 
-- Add a `GET /history?repo=...&days=30` daemon endpoint that returns the
-  per-day composite score from the existing baseline persistence.
-- Replace the placeholder Sparkline in `web/src/components/Sparkline.tsx`
-  with a real fetch — the component already renders any `number[]` passed
-  to it, so the integration is a single client call.
-
-## Phase 2.3 — baseline diff overlay
-
-- The radar component already accepts an optional `baseline` series and
-  draws it as a dashed polygon. The MVP wires this to
-  `score.baseline?.indicators ?? null`. Phase 2.3 should:
-  - Show a per-indicator diff (current − baseline) in tooltips.
-  - Surface the daemon-reported `delta` more prominently on the score
-    banner (it's already rendered when non-null).
-
-## Phase 2.4 — treemap
-
-- The daemon already exposes `/treemap?repo=...`. Add a `Treemap.tsx`
-  panel using `@visx/hierarchy`. The wire shape is:
-
-  ```json
-  {
-    "repo": "...",
-    "treemap": {
-      "attack_surface_files": 160,
-      "files": [{ "kind": "god", "path": "...", "size": 41 }, ...],
-      "max_blast_file": "...",
-      "max_blast_radius": 219
-    }
-  }
-  ```
-
-## Phase 2.5 — rules panel
-
-- Daemon exposes `/rules?repo=...` (returns 400 when the repo has no
-  `.sentrux/rules.toml`; otherwise returns violations).
-- Render the violations list and a "rules loaded" indicator. No
-  authoring/editing in this phase — the GUI must remain read-only so the
-  daemon stays the single source of truth.
+- `sentrux serve` does not expose `GET /history?repo=...` — there is no
+  per-day score series in the baseline store, only the current baseline. The
+  `Sparkline` component still renders a placeholder; wiring it is a one-line
+  client call once the endpoint exists.
+- **Daemon work needed**: persist a daily composite-score series (e.g. under
+  `state_dir/history/<repo>.jsonl`) and serve `GET /history?repo=...&days=N`
+  → `{ "repo": ..., "points": [{ "day": "YYYY-MM-DD", "score": N }, ...] }`.
 
 ## Phase 2.6 — multi-repo comparison
 

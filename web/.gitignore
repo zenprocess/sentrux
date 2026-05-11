@@ -1,5 +1,9 @@
 node_modules
-dist
+# dist/ is committed: the daemon embeds web/dist/ into the binary at compile
+# time (see sentrux-bin/src/assets.rs), so a checked-out tree must already
+# contain a built SPA for `cargo build` to produce a working `sentrux serve`.
+# Rebuild + recommit it after touching anything under web/src/:
+#   cd web && npm run build
 dist-ssr
 *.local
 .vite
