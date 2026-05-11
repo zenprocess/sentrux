@@ -200,3 +200,81 @@ fn rules_endpoint_handles_missing_rules_toml() {
     assert_eq!(body["rules_loaded"], false);
     assert_eq!(body["violation_count"], 0);
 }
+
+// --- Phase 2.1 — embedded web GUI ----------------------------------------
+
+#[test]
+#[ignore = "requires release binary; run with `cargo test --release -- --ignored`"]
+fn root_serves_embedded_spa_shell() {
+    let watch = make_fixture_repo();
+    let _daemon = Daemon::spawn(watch.path());
+
+    let resp = ureq::get(&format!("http://127.0.0.1:{}/", PORT))
+        .call()
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.header("content-type")
+            .unwrap_or_default()
+            .contains("text/html"),
+        "/ should be served as html"
+    );
+    let body = resp.into_string().unwrap();
+    assert!(body.contains("<div id=\"root\">"), "SPA shell mounts #root");
+}
+
+#[test]
+#[ignore = "requires release binary; run with `cargo test --release -- --ignored`"]
+fn unknown_client_route_falls_back_to_index() {
+    let watch = make_fixture_repo();
+    let _daemon = Daemon::spawn(watch.path());
+
+    // A path with no file extension is treated as a client-side route → index.html.
+    let resp = ureq::get(&format!("http://127.0.0.1:{}/some/deep/link", PORT))
+        .call()
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(resp
+        .header("content-type")
+        .unwrap_or_default()
+        .contains("text/html"));
+
+    // A path that looks like a missing static file is a genuine 404.
+    let err = ureq::get(&format!("http://127.0.0.1:{}/nope.js", PORT))
+        .call()
+        .unwrap_err();
+    match err {
+        ureq::Error::Status(code, _) => assert_eq!(code, 404),
+        ureq::Error::Transport(t) => panic!("transport error: {}", t),
+    }
+}
+
+#[test]
+#[ignore = "requires release binary; run with `cargo test --release -- --ignored`"]
+fn baseline_persists_indicator_values() {
+    let watch = make_fixture_repo();
+    let daemon = Daemon::spawn(watch.path());
+    daemon.wait_for_repos(1, 10);
+
+    let set_resp = ureq::post(&format!("http://127.0.0.1:{}/baseline?repo=demo", PORT))
+        .set("Content-Type", "application/json")
+        .send_string(r#"{"action":"set"}"#)
+        .unwrap();
+    assert_eq!(set_resp.status(), 200);
+    let set_body: serde_json::Value = set_resp.into_json().unwrap();
+    for indicator in &["modularity", "acyclicity", "depth", "equality", "redundancy"] {
+        assert!(
+            set_body["baseline"]["indicators"][indicator].is_number(),
+            "baseline should persist {} value",
+            indicator
+        );
+    }
+
+    // /score should surface the persisted per-indicator baseline so the GUI
+    // can draw a "vs baseline" overlay.
+    let score_resp = ureq::get(&format!("http://127.0.0.1:{}/score?repo=demo", PORT))
+        .call()
+        .unwrap();
+    let score_body: serde_json::Value = score_resp.into_json().unwrap();
+    assert!(score_body["baseline"]["indicators"]["modularity"].is_number());
+}
